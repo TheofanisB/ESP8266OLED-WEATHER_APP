@@ -3,85 +3,111 @@
 #include <ArduinoJson.h>
 #include <ESP8266HTTPClient.h>
 
-const char* ssid = "INSERT_YOUR_WIFI_SSID_HERE";
+const char* ssid     = "INSERT_YOUR_WIFI_SSID_HERE";
 const char* password = "INSERT_YOUR_WIFI_PASSWD_HERE";
+const char* apiKey   = "INSERT_YOUR_OPENWEATHERMAP_API_KEY_HERE";
+const char* city     = "Kifissia";
+const char* country  = "GR";  // ISO 3166-1 alpha-2 country code
 
+const unsigned long UPDATE_INTERVAL = 1800000UL;  // 30 minutes
 
-const char* apiKey = "INSERT YOUR OPEN WEATHER MAP API KEY HERE";
+U8G2_SSD1306_128X64_NONAME_1_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 
-// DEFINE YOUR LOCATION HERE
-const char* city = "Kifissia";
-const char* country = "Greece";
-
-
-U8G2_SSD1306_128X64_NONAME_1_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE); // OLED SCREEN INIT
-
-void setup() {
-  
-  Serial.begin(115200); //SERIAL INIT
-
-  
-  WiFi.begin(ssid, password); //WIFI INIT
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.println("Connecting to WiFi...");
-  }
-  Serial.println("Connected to WiFi");
-
- 
-  u8g2.begin(); // OLED INIT
+void showStatus(const char* line1, const char* line2 = nullptr) {
   u8g2.clearBuffer();
-
-
-  updateWeather(); //API DATA PULL
+  u8g2.setFont(u8g2_font_ncenB08_tr);
+  u8g2.setCursor(0, 16);
+  u8g2.print(line1);
+  if (line2) {
+    u8g2.setCursor(0, 34);
+    u8g2.print(line2);
+  }
+  u8g2.sendBuffer();
 }
 
-void loop() {
- 
-  static unsigned long lastUpdate = 0;
-  if (millis() - lastUpdate >= 1800000) { //UPDATED THE WEATHER DISPLAYED EVERY 30 MINS 
-    updateWeather();
-    lastUpdate = millis();
+void connectWiFi() {
+  showStatus("Connecting to WiFi...");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
   }
+  Serial.println("\nConnected");
+  showStatus("WiFi connected!");
+  delay(800);
 }
 
 void updateWeather() {
   WiFiClient client;
   HTTPClient http;
-  String url = "http://api.openweathermap.org/data/2.5/weather?q=" + String(city) + "," + String(country) + "&appid=" + String(apiKey);
-  http.begin(client, url);
 
- 
-  int httpResponseCode = http.GET();
+  http.begin(client, String("http://api.openweathermap.org/data/2.5/weather?q=")
+                     + city + "," + country
+                     + "&units=metric&appid=" + apiKey);
 
-  if (httpResponseCode > 0) {
-    String payload = http.getString();
-    DynamicJsonDocument doc(1024);
-    deserializeJson(doc, payload);
-    JsonObject weather = doc["weather"][0];
-    JsonObject main = doc["main"];
-    const char* description = weather["description"];
-    float temperature = main["temp"].as<float>() - 273.15; // Convert Kelvin to Celsius
+  int httpCode = http.GET();
 
-    // INFORMATION THAT WILL BE DISPLAYED
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_ncenB14_tr);
-    u8g2.setCursor(0, 20);
-    u8g2.print("Weather in ");
-    u8g2.print(city);
-    u8g2.print(", ");
-    u8g2.println(country);
-    u8g2.setCursor(0, 40);
-    u8g2.print("Description: ");
-    u8g2.println(description);
-    u8g2.print("Temperature: ");
-    u8g2.print(temperature, 1);
-    u8g2.println(" °C");
-    u8g2.sendBuffer();
-  } else {
-    Serial.println("Error in HTTP request");
+  if (httpCode != HTTP_CODE_OK) {
+    char msg[22];
+    snprintf(msg, sizeof(msg), "HTTP error: %d", httpCode);
+    showStatus("API failed", msg);
+    Serial.println(msg);
+    http.end();
+    return;
   }
 
-  // CLOSE THE CONNECTION
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, http.getStream());
   http.end();
+
+  if (err) {
+    showStatus("JSON error", err.c_str());
+    Serial.print("JSON error: ");
+    Serial.println(err.c_str());
+    return;
+  }
+
+  const char* description = doc["weather"][0]["description"] | "unknown";
+  float temp      = doc["main"]["temp"]       | 0.0f;
+  float feelsLike = doc["main"]["feels_like"] | 0.0f;
+  int   humidity  = doc["main"]["humidity"]   | 0;
+
+  char tempStr[20], feelsStr[20], humStr[20];
+  snprintf(tempStr,  sizeof(tempStr),  "Temp:  %.1f C", temp);
+  snprintf(feelsStr, sizeof(feelsStr), "Feels: %.1f C", feelsLike);
+  snprintf(humStr,   sizeof(humStr),   "Humid: %d%%", humidity);
+
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_ncenB08_tr);
+  u8g2.setCursor(0, 10);
+  u8g2.print(city);
+  u8g2.print(", ");
+  u8g2.print(country);
+  u8g2.drawHLine(0, 13, 128);
+  u8g2.setCursor(0, 24);  u8g2.print(description);
+  u8g2.setCursor(0, 36);  u8g2.print(tempStr);
+  u8g2.setCursor(0, 48);  u8g2.print(feelsStr);
+  u8g2.setCursor(0, 60);  u8g2.print(humStr);
+  u8g2.sendBuffer();
+
+  Serial.println("Weather updated");
+}
+
+void setup() {
+  Serial.begin(115200);
+  u8g2.begin();
+  connectWiFi();
+  updateWeather();
+}
+
+void loop() {
+  if (WiFi.status() != WL_CONNECTED) {
+    connectWiFi();
+  }
+
+  static unsigned long lastUpdate = 0;
+  if (millis() - lastUpdate >= UPDATE_INTERVAL) {
+    updateWeather();
+    lastUpdate = millis();
+  }
 }
